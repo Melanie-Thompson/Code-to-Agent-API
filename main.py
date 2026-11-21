@@ -92,6 +92,38 @@ async def remove_package(name: str):
     return {"removed": name}
 
 
+class ExecuteRequest(BaseModel):
+    args: dict[str, Any] = {}
+
+
+@app.post("/packages/{name}/execute")
+async def execute_tool(name: str, req: ExecuteRequest):
+    """Execute a tool package and return its result.
+
+    The API server is the execution environment — harnesses send tool
+    calls here instead of running code locally.
+    """
+    pkg = _registry.get(name)
+    if pkg is None:
+        return {"error": f"package '{name}' not found"}
+
+    try:
+        namespace: dict[str, Any] = {}
+        exec(compile(pkg.source_code, f"<package:{name}>", "exec"), namespace)  # noqa: S102
+        fn = namespace.get(name)
+        if fn is None:
+            available = [k for k in namespace if callable(namespace[k]) and not k.startswith("_")]
+            fn = namespace[available[0]] if len(available) == 1 else None
+        if fn is None:
+            return {"error": f"no callable found in package '{name}'"}
+
+        result = fn(**req.args)
+        return {"result": str(result), "tool": name}
+    except Exception as e:
+        log.exception("tool execution failed: %s", name)
+        return {"error": f"{type(e).__name__}: {e}", "tool": name}
+
+
 # ── Key management ─────────────────────────────────────────────────────────
 
 @app.post("/keys/{publisher}")
