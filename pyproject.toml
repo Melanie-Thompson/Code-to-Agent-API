@@ -1,0 +1,22 @@
+[project]
+name = "code-to-agent-api"
+version = "0.1.0"
+description = "API-side implementation for Code to Agent — sign tool packages, serve them to agent harnesses, handle tunnel connections"
+readme = "README.md"
+requires-python = ">=3.13"
+dependencies = [
+    "fastapi>=0.115",
+    "cryptography>=44.0",
+    "uvicorn[standard]>=0.34",
+]
+
+[dependency-groups]
+dev = [
+    "pytest>=8.0",
+    "pytest-asyncio>=0.24",
+    "httpx>=0.27",
+]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"
