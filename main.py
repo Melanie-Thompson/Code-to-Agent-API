@@ -13,6 +13,7 @@ from typing import Any
 from fastapi import FastAPI
 from pydantic import BaseModel
 
+from api.causality import close_session as close_causality_session, get_validator
 from api.effect_monitor import monitor_effects
 from api.registry import PackageRegistry
 from api.signing import KeyStore
@@ -95,6 +96,8 @@ async def remove_package(name: str):
 
 class ExecuteRequest(BaseModel):
     args: dict[str, Any] = {}
+    session_id: str = "default"
+    user_message: str = ""
 
 
 @app.post("/packages/{name}/execute")
@@ -102,11 +105,28 @@ async def execute_tool(name: str, req: ExecuteRequest):
     """Execute a tool package and return its result.
 
     The API server is the execution environment — harnesses send tool
-    calls here instead of running code locally.
+    calls here instead of running code locally. The dependency DAG is
+    enforced here: if a tool's depends_on prerequisites haven't been
+    called in this session, execution is blocked.
     """
     pkg = _registry.get(name)
     if pkg is None:
         return {"error": f"package '{name}' not found"}
+
+    # Validate dependency DAG before execution
+    validator = get_validator(req.session_id)
+    causal = validator.check_before_execute(name, req.args, pkg.definition)
+    if not causal.valid:
+        return {
+            "error": f"causality violation: {'; '.join(causal.violations)}",
+            "tool": name,
+            "causality": causal.to_dict(),
+        }
+
+    # Trace data flow for this call
+    data_flow, flow_warnings = validator.trace_data_flow(
+        name, req.args, req.user_message
+    )
 
     try:
         namespace: dict[str, Any] = {}
@@ -125,7 +145,22 @@ async def execute_tool(name: str, req: ExecuteRequest):
         if effects:
             log.info("tool '%s' effects: %s", name, effects)
 
-        return {"result": str(result), "tool": name, "effects": effects}
+        # Record successful execution for future dependency checks
+        result_str = str(result)
+        validator.record_execution(name, req.args, result_str)
+
+        causality_info = causal.to_dict()
+        if data_flow:
+            causality_info["data_flow"] = [e.to_dict() for e in data_flow]
+        if flow_warnings:
+            causality_info["flow_warnings"] = flow_warnings
+
+        return {
+            "result": result_str,
+            "tool": name,
+            "effects": effects,
+            "causality": causality_info,
+        }
     except Exception as e:
         log.exception("tool execution failed: %s", name)
         return {"error": f"{type(e).__name__}: {e}", "tool": name}
@@ -170,7 +205,15 @@ async def close_tunnel(session_id: str):
     """Close all tunnels for a session."""
     reg = get_tunnel_registry()
     count = reg.close_session(session_id)
+    close_causality_session(session_id)
     return {"closed": count, "session_id": session_id}
+
+
+@app.delete("/sessions/{session_id}/causality")
+async def reset_causality(session_id: str):
+    """Reset causality tracking for a session (e.g. new conversation turn)."""
+    close_causality_session(session_id)
+    return {"reset": session_id}
 
 
 # ── Health ─────────────────────────────────────────────────────────────────
