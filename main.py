@@ -13,6 +13,7 @@ from typing import Any
 from fastapi import FastAPI
 from pydantic import BaseModel
 
+from api.effect_monitor import monitor_effects
 from api.registry import PackageRegistry
 from api.signing import KeyStore
 from api.tunnel_auth import TunnelAuthMiddleware, get_tunnel_registry
@@ -117,8 +118,14 @@ async def execute_tool(name: str, req: ExecuteRequest):
         if fn is None:
             return {"error": f"no callable found in package '{name}'"}
 
-        result = fn(**req.args)
-        return {"result": str(result), "tool": name}
+        with monitor_effects() as report:
+            result = fn(**req.args)
+
+        effects = report.to_list()
+        if effects:
+            log.info("tool '%s' effects: %s", name, effects)
+
+        return {"result": str(result), "tool": name, "effects": effects}
     except Exception as e:
         log.exception("tool execution failed: %s", name)
         return {"error": f"{type(e).__name__}: {e}", "tool": name}
